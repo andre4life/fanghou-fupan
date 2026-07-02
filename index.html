@@ -54,6 +54,12 @@ body{font-family:"PingFang SC","Microsoft YaHei",sans-serif;background:var(--bg)
 .transcribed-edit-hint{font-size:12px;color:var(--muted);margin-top:6px;text-align:right;display:none}
 .transcribed-edit-hint.show{display:block}
 
+.wechat-notice{background:#FFF8F0;border:1px solid #FED7AA;border-radius:10px;padding:12px 16px;margin-bottom:14px;font-size:13px;color:var(--amber);display:none}
+.kb-status{font-size:12px;color:var(--muted);text-align:center;margin-top:8px;display:none}
+.kb-status.loading{display:block}
+.kb-status.loaded{display:none}
+.kb-status.error{display:block;color:var(--red)}
+
 .btn{display:block;width:100%;padding:12px;background:var(--purple);color:#fff;border:none;border-radius:10px;font-size:15px;font-weight:600;cursor:pointer;margin-top:16px;transition:all .2s}
 .btn:hover{background:#5a2d9e}
 .btn:disabled{background:#c4b5e0;cursor:not-allowed}
@@ -169,7 +175,8 @@ body{font-family:"PingFang SC","Microsoft YaHei",sans-serif;background:var(--bg)
     <div class="tab active" onclick="switchTab('record')">🎙️ 语音复盘</div>
     <div class="tab" onclick="switchTab('manual')">✍️ 手动填写</div>
   </div>
-  <div class="tab-content active" id="tab-record">
+    <div class="tab-content active" id="tab-record">
+    <div class="wechat-notice" id="wechatNotice">📱 检测到微信浏览器，语音识别暂不支持，已为您切换至「手动填写」模式</div>
     <div class="template-guide">
       <strong>📋 语音复盘模板：</strong><br>
       "今天见了客户<strong>XX岁/职业/收入</strong>，主要聊了<strong>XX</strong>。<br>
@@ -188,6 +195,7 @@ body{font-family:"PingFang SC","Microsoft YaHei",sans-serif;background:var(--bg)
     <textarea class="review-textarea" id="manualText" placeholder="在此粘贴或手写复盘内容...&#10;&#10;1. 客户画像：年龄/职业/收入/家庭&#10;2. 讨论主题：聊了什么&#10;3. 客户异议：反对什么 + 我怎么回的&#10;4. 情绪变化：态度怎么变&#10;5. 结果与反思：谈成了吗？哪里不够好？"></textarea>
   </div>
   <button class="btn" id="analyzeBtn" onclick="analyzeReview()">🔍 开始分析</button>
+  <div class="kb-status" id="kbStatus">📚 知识库加载中...</div>
   <div class="output-section" id="outputCard" style="display:none">
     <div class="output-header">
       <h2>📊 复盘分析报告</h2>
@@ -267,6 +275,10 @@ var currentReportHTML = '';
 var kbItems = [];
 var kbLoaded = false;
 
+// ===== 环境检测 =====
+var isWeChat=navigator.userAgent.toLowerCase().indexOf('micromessenger')>-1;
+var hasSpeech=!!(window.SpeechRecognition||window.webkitSpeechRecognition);
+
 function loadDB(){
   try{var d=localStorage.getItem(DB_KEY);return d?JSON.parse(d):[]}
   catch(e){return[]}
@@ -277,15 +289,33 @@ function setDB(data){saveDB(data)}
 
 // ===== 初始化 =====
 document.addEventListener('DOMContentLoaded',function(){
-  var name=localStorage.getItem('lastCustomerName');
-  if(name)document.getElementById('customerName').value=name;
-  updateCounts();
-  loadKBIndex();
-  // 语音识别文本的手动编辑同步
-  document.getElementById('transcribedText').addEventListener('input',function(){
-    reviewText=this.value;
-    voiceBaseText=this.value;
-  });
+  try{
+    var name=localStorage.getItem('lastCustomerName');
+    if(name)document.getElementById('customerName').value=name;
+    updateCounts();
+    loadKBIndex();
+    // 语音识别文本的手动编辑同步
+    var tta=document.getElementById('transcribedText');
+    if(tta){
+      tta.addEventListener('input',function(){
+        reviewText=this.value;
+        voiceBaseText=this.value;
+      });
+    }
+    // 微信环境：自动切换到手动填写，隐藏语音
+    if(isWeChat){
+      switchTab('manual');
+      document.querySelector('.tab[onclick*=\"record\"]').style.display='none';
+      var notice=document.getElementById('wechatNotice');
+      if(notice)notice.style.display='block';
+    }else if(!hasSpeech){
+      // 不支持语音的浏览器（如部分安卓WebView）
+      document.querySelector('.tab[onclick*=\"record\"]').style.display='none';
+      switchTab('manual');
+    }
+  }catch(e){
+    console.warn('初始化异常:',e);
+  }
 });
 function persistCustomerName(){
   var name=document.getElementById('customerName').value.trim();
@@ -330,42 +360,55 @@ function switchTab(tab){
 var sr=null, reviewText='';
 var voiceBaseText='';  // 中断前已识别的文本，重启时保留
 function toggleRecording(){
+  // 环境不支持语音时降级
+  if(!hasSpeech){
+    document.getElementById('recStatus').textContent='⚠️ 当前浏览器不支持语音识别，请切换手动填写';
+    switchTab('manual');
+    return;
+  }
   var btn=document.getElementById('recBtn');
   if(btn.classList.contains('recording')){stopVoiceReview();return}
   if(!sr){
-    var SR=window.SpeechRecognition||window.webkitSpeechRecognition;
-    sr=new SR();sr.lang='zh-CN';sr.interimResults=true;sr.continuous=true;
-    sr.onresult=function(e){
-      var t='';
-      for(var i=e.resultIndex;i<e.results.length;i++)
-        t+=e.results[i][0].transcript;
-      // 保留之前会话的文本 + 追加本次识别结果
-      reviewText=voiceBaseText+t;
-      var el=document.getElementById('transcribedText');
-      el.value=reviewText;
-      el.style.color='var(--text)';
-      if(reviewText.length>0)el.classList.add('show');
-      document.getElementById('editHint').classList.add('show');
-    };
-    sr.onerror=function(e){
-      voiceBaseText=reviewText;  // 出错时也保留已识别内容
-      document.getElementById('recStatus').textContent='⚠️ 识别中断：'+e.error;
+    try{
+      var SR=window.SpeechRecognition||window.webkitSpeechRecognition;
+      if(!SR){hasSpeech=false;switchTab('manual');return}
+      sr=new SR();sr.lang='zh-CN';sr.interimResults=true;sr.continuous=true;
+      sr.onresult=function(e){
+        var t='';
+        for(var i=e.resultIndex;i<e.results.length;i++)
+          t+=e.results[i][0].transcript;
+        // 保留之前会话的文本 + 追加本次识别结果
+        reviewText=voiceBaseText+t;
+        var el=document.getElementById('transcribedText');
+        el.value=reviewText;
+        el.style.color='var(--text)';
+        if(reviewText.length>0)el.classList.add('show');
+        document.getElementById('editHint').classList.add('show');
+      };
+      sr.onerror=function(e){
+        voiceBaseText=reviewText;  // 出错时也保留已识别内容
+        document.getElementById('recStatus').textContent='⚠️ 识别中断：'+e.error;
+        stopVoiceReview();
+      };
+      sr.onend=function(){
+        btn.classList.remove('recording');
+        voiceBaseText=reviewText;  // 中断时冻结当前文本，下次追加
+        // 让文本可编辑
+        var el=document.getElementById('transcribedText');
+        el.removeAttribute('readonly');
+        el.classList.add('editable');
+        document.getElementById('editHint').classList.add('show');
+        if(reviewText.length>0){
+          document.getElementById('recStatus').textContent='✅ 已识别 '+reviewText.length+' 字（可手动修改）';
+        }else{
+          document.getElementById('recStatus').textContent='未识别到内容';
+        }
+      };
+    }catch(e){
+      hasSpeech=false;
+      document.getElementById('recStatus').textContent='⚠️ 语音识别启动失败';
       stopVoiceReview();
-    };
-    sr.onend=function(){
-      btn.classList.remove('recording');
-      voiceBaseText=reviewText;  // 中断时冻结当前文本，下次追加
-      // 让文本可编辑
-      var el=document.getElementById('transcribedText');
-      el.removeAttribute('readonly');
-      el.classList.add('editable');
-      document.getElementById('editHint').classList.add('show');
-      if(reviewText.length>0){
-        document.getElementById('recStatus').textContent='✅ 已识别 '+reviewText.length+' 字（可手动修改）';
-      }else{
-        document.getElementById('recStatus').textContent='未识别到内容';
-      }
-    };
+    }
   }
   // 只有首次启动时清空（无已识别内容）
   if(!voiceBaseText){
@@ -391,7 +434,7 @@ function stopVoiceReview(){
 }
 
 // ===== 分析引擎 =====
-async function analyzeReview(){
+function analyzeReview(){
   try{
     var cname=document.getElementById('customerName').value.trim();
     if(!cname){alert('请先输入客户姓名');return}
@@ -411,8 +454,8 @@ async function analyzeReview(){
     currentReportHTML=buildReport(txt);
     currentReport={customerName:cname,customerInfo:extractProfile(txt),rawText:txt,tags:extractThemes(txt).split('、').filter(Boolean)};
 
-    // Step 2: 并行检索知识库
-    var kbResults=await searchKBForTopics(txt);
+    // Step 2: 检索知识库（同步，本地内存检索）
+    var kbResults=searchKBForTopics(txt);
 
     // Step 3: 富化报告——插入知识库参考建议
     var enrichedHTML=enrichWithKB(currentReportHTML,kbResults,txt);
@@ -756,16 +799,35 @@ function extractTopicsForKB(txt){
 
 // 加载本地知识库索引
 function loadKBIndex(){
-  fetch('kb-index.json?v='+Date.now())
-    .then(function(res){return res.json()})
-    .then(function(data){
-      kbItems=data.items||[];
-      kbLoaded=true;
-      console.log('知识库已加载：'+kbItems.length+' 篇');
-    })
-    .catch(function(e){
-      console.warn('知识库索引加载失败:',e);
-    });
+  var st=document.getElementById('kbStatus');
+  if(st)st.className='kb-status loading';
+  
+  // 用 XMLHttpRequest 替代 fetch（兼容更老的X5内核）
+  var xhr=new XMLHttpRequest();
+  xhr.open('GET','kb-index.json?v='+Date.now(),true);
+  xhr.timeout=15000;  // 15秒超时
+  
+  xhr.onload=function(){
+    if(xhr.status===200){
+      try{
+        var data=JSON.parse(xhr.responseText);
+        kbItems=data.items||[];
+        kbLoaded=true;
+        if(st)st.className='kb-status loaded';
+      }catch(e){
+        if(st){st.textContent='⚠️ 知识库解析失败，部分功能不可用';st.className='kb-status error'}
+      }
+    }else{
+      if(st){st.textContent='⚠️ 知识库加载失败('+xhr.status+')';st.className='kb-status error'}
+    }
+  };
+  xhr.onerror=function(){
+    if(st){st.textContent='⚠️ 知识库网络错误，部分功能不可用';st.className='kb-status error'}
+  };
+  xhr.ontimeout=function(){
+    if(st){st.textContent='⚠️ 知识库加载超时，请检查网络';st.className='kb-status error'}
+  };
+  xhr.send();
 }
 
 // 本地知识库搜索（纯前端，不依赖后端）
@@ -780,12 +842,10 @@ function searchIndex(keyword, maxResults){
     var catMatch=entry.category.toLowerCase().indexOf(keyword)>-1;
     var titleMatch=entry.title.toLowerCase().indexOf(keyword)>-1;
     var snippetMatch=entry.snippet.toLowerCase().indexOf(keyword)>-1;
-    var contentMatch=entry.fullContent.toLowerCase().indexOf(keyword)>-1;
 
     if(titleMatch)score+=10;
     if(catMatch)score+=5;
     if(snippetMatch)score+=3;
-    if(contentMatch)score+=1;
 
     if(score>0){
       var snippet=snippetMatch?extractSnippetAround(entry.snippet,keyword):entry.snippet.substring(0,120);
@@ -812,8 +872,8 @@ function extractSnippetAround(text,keyword){
   return(start>0?'...':'')+text.substring(start,end)+(end<text.length?'...':'');
 }
 
-// 异步搜索知识库（改为本地检索）
-async function searchKBForTopics(txt){
+// 搜索知识库（本地检索）
+function searchKBForTopics(txt){
   var topics=extractTopicsForKB(txt);
   var allResults=[];
   var seen={};

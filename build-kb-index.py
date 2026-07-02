@@ -54,12 +54,11 @@ def build_index():
             elif item.endswith('.md'):
                 rel_path = os.path.relpath(full_path, KB_DIR)
                 title = item[:-3].replace('_', ' ')
-                content = ''
                 snippet = ''
                 try:
                     with open(full_path, 'r', encoding='utf-8') as f:
-                        content = f.read(5000)  # 只读前5000字符
-                    snippet = re.sub(r'[\r\n]+', ' ', content[:300]).strip()
+                        content = f.read(3000)  # 只读前3000字符
+                    snippet = re.sub(r'[\r\n]+', ' ', content[:500]).strip()
                 except Exception as e:
                     errors.append(f'{rel_path}: {e}')
                 
@@ -68,8 +67,7 @@ def build_index():
                     'category': category or '',
                     'filename': item,
                     'title': title,
-                    'snippet': snippet[:300],
-                    'fullContent': content[:2000]
+                    'snippet': snippet[:500]
                 }
                 index.append(entry)
     
