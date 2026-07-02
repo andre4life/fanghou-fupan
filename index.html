@@ -317,20 +317,51 @@ function switchTab(tab){
 
 // ===== 语音 =====
 var sr=null, reviewText='';
+var voiceBaseText='';  // 中断前已识别的文本，重启时保留
 function toggleRecording(){
   var btn=document.getElementById('recBtn');
   if(btn.classList.contains('recording')){stopVoiceReview();return}
   if(!sr){
     var SR=window.SpeechRecognition||window.webkitSpeechRecognition;
     sr=new SR();sr.lang='zh-CN';sr.interimResults=true;sr.continuous=true;
-    sr.onresult=function(e){var t='';for(var i=e.resultIndex;i<e.results.length;i++)t+=e.results[i][0].transcript;reviewText=t;var el=document.getElementById('transcribedText');el.textContent=t;el.style.color='var(--text)';if(t.length>0)el.classList.add('show')};
-    sr.onerror=function(e){document.getElementById('recStatus').textContent='⚠️ '+e.error;stopVoiceReview()};
-    sr.onend=function(){btn.classList.remove('recording');if(reviewText.length>0){document.getElementById('recStatus').textContent='✅ 已识别 '+reviewText.length+' 字';}else{document.getElementById('recStatus').textContent='未识别到内容'}};
+    sr.onresult=function(e){
+      var t='';
+      for(var i=e.resultIndex;i<e.results.length;i++)
+        t+=e.results[i][0].transcript;
+      // 保留之前会话的文本 + 追加本次识别结果
+      reviewText=voiceBaseText+t;
+      var el=document.getElementById('transcribedText');
+      el.textContent=reviewText;
+      el.style.color='var(--text)';
+      if(reviewText.length>0)el.classList.add('show');
+    };
+    sr.onerror=function(e){
+      voiceBaseText=reviewText;  // 出错时也保留已识别内容
+      document.getElementById('recStatus').textContent='⚠️ 识别中断：'+e.error;
+      stopVoiceReview();
+    };
+    sr.onend=function(){
+      btn.classList.remove('recording');
+      voiceBaseText=reviewText;  // 中断时冻结当前文本，下次追加
+      if(reviewText.length>0){
+        document.getElementById('recStatus').textContent='✅ 已识别 '+reviewText.length+' 字';
+      }else{
+        document.getElementById('recStatus').textContent='未识别到内容';
+      }
+    };
   }
-  reviewText='';document.getElementById('transcribedText').textContent='';document.getElementById('transcribedText').classList.remove('show');
+  // 只有首次启动时清空（无已识别内容）
+  if(!voiceBaseText){
+    reviewText='';
+    document.getElementById('transcribedText').textContent='';
+    document.getElementById('transcribedText').classList.remove('show');
+  }
   sr.start();btn.classList.add('recording');document.getElementById('recStatus').textContent='🎙️ 正在听...';
 }
-function stopVoiceReview(){if(sr)sr.stop();document.getElementById('recBtn').classList.remove('recording')}
+function stopVoiceReview(){
+  if(sr)sr.stop();
+  document.getElementById('recBtn').classList.remove('recording');
+}
 
 // ===== 分析引擎 =====
 async function analyzeReview(){
