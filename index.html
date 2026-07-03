@@ -176,7 +176,7 @@ body{font-family:"PingFang SC","Microsoft YaHei",sans-serif;background:var(--bg)
     <div class="tab" onclick="switchTab('manual')">✍️ 手动填写</div>
   </div>
     <div class="tab-content active" id="tab-record">
-    <div class="wechat-notice" id="wechatNotice">📱 检测到微信浏览器，语音识别暂不支持，已为您切换至「手动填写」模式</div>
+    <div class="wechat-notice" id="wechatNotice">📱 微信内点击🎙️即可调用手机原生录音机，录完自动生成回放，收听后再手动输入</div>
     <div class="template-guide">
       <strong>📋 语音复盘模板：</strong><br>
       "今天见了客户<strong>XX岁/职业/收入</strong>，主要聊了<strong>XX</strong>。<br>
@@ -301,13 +301,13 @@ document.addEventListener('DOMContentLoaded',function(){
       var notice=document.getElementById('wechatNotice');
       if(notice){
         if(isWeChat){
-          notice.innerHTML='📱 微信浏览器不支持自动语音识别，但您仍可<strong>录音后收听回放</strong>，再手动输入复盘内容。';
+          notice.innerHTML='📱 微信内点击🎙️麦克风按钮即可调用<strong>手机原生录音机</strong>，录完后自动生成回放播放器，收听后再手动输入复盘内容。';
         }else{
           notice.innerHTML='🌐 当前浏览器不支持自动语音识别，但您仍可<strong>录音后收听回放</strong>，再手动输入复盘内容。';
         }
         notice.style.display='block';
       }
-      // 不隐藏语音标签页 — 用 MediaRecorder 录音 + 手动转录
+      // 不隐藏语音标签页 — 用 文件选择器/MediaRecorder 录音 + 手动转录
     }
   }catch(e){
     console.warn('初始化异常:',e);
@@ -428,6 +428,12 @@ function toggleSpeechRec(){
 function toggleMediaRec(){
   var btn=document.getElementById('recBtn');
 
+  // 微信/移动端 → 用原生录音文件选择器（兼容性最好，所有手机都支持）
+  if(isWeChat||/android|iphone|ipad|ipod/i.test(navigator.userAgent)){
+    pickAudioFile();
+    return;
+  }
+
   // 正在录音 → 停止
   if(isRecordingAudio){
     if(mediaRec&&mediaRec.state==='recording'){
@@ -439,10 +445,9 @@ function toggleMediaRec(){
     return;
   }
 
-  // 检查设备是否支持录音
+  // 检查设备是否支持 getUserMedia
   if(!navigator.mediaDevices||!navigator.mediaDevices.getUserMedia){
-    document.getElementById('recStatus').textContent='⚠️ 当前设备不支持录音，请切换手动填写';
-    switchTab('manual');
+    pickAudioFile();  // 降级到文件选择器
     return;
   }
 
@@ -453,18 +458,16 @@ function toggleMediaRec(){
 
   navigator.mediaDevices.getUserMedia({audio:true})
     .then(function(stream){
-      // 确定支持的音频格式
       var mime='audio/webm';
       if(typeof MediaRecorder!=='function'){
         stream.getTracks().forEach(function(t){t.stop()});
-        document.getElementById('recStatus').textContent='⚠️ 当前浏览器不支持录音功能，请切换手动填写';
-        switchTab('manual');
+        pickAudioFile();
         return;
       }
       if(!MediaRecorder.isTypeSupported('audio/webm')){
         mime='audio/ogg;codecs=opus';
         if(!MediaRecorder.isTypeSupported(mime)){
-          mime='';  // 让浏览器自动选择
+          mime='';
         }
       }
 
@@ -480,40 +483,14 @@ function toggleMediaRec(){
 
       mediaRec.onstop=function(){
         stream.getTracks().forEach(function(t){t.stop()});
-
-        // 构造录音文件
         var ext=mediaRec.mimeType||'audio/webm';
         audioBlob=new Blob(audioChunks,{type:ext});
         audioUrl=URL.createObjectURL(audioBlob);
-
         isRecordingAudio=false;
         btn.classList.remove('recording');
-
-        // 估算时长（大约16KB/秒opus）
         var dur=Math.max(1,Math.round(audioBlob.size/16000));
-
-        // 构建播放器UI
-        var apHtml='<div id="audioPlayerWrap" style="margin-top:10px;padding:14px;background:#F7FAFC;border-radius:10px;border:1px solid var(--border)">'+
-          '<div style="font-size:13px;font-weight:600;color:var(--slate);margin-bottom:8px;display:flex;align-items:center;gap:6px">'+
-          '<span style="font-size:18px">🎵</span> 录音回放（约'+dur+'秒）</div>'+
-          '<audio controls src="'+audioUrl+'" style="width:100%;border-radius:6px"></audio>'+
-          '<div style="font-size:12px;color:var(--muted);margin-top:8px">'+
-          '👆 收听录音后，在下文输入框中输入复盘内容，然后点击"开始分析"</div></div>';
-
-        // 移除旧的播放器
-        var oldAp=document.getElementById('audioPlayerWrap');
-        if(oldAp)oldAp.remove();
-
-        document.getElementById('recStatus').innerHTML=apHtml;
-
-        // 显示文本框，让用户手动输入
-        var ta=document.getElementById('transcribedText');
-        ta.classList.add('show');
-        ta.removeAttribute('readonly');
-        ta.classList.add('editable');
-        ta.placeholder='请在此输入您的复盘内容（收听录音后手动输入）...';
-        document.getElementById('editHint').classList.add('show');
-        document.getElementById('editHint').textContent='✏️ 请在此输入复盘内容，完成后点击"开始分析"';
+        showAudioPlayer(audioUrl,dur);
+        showTranscriptionInput();
       };
 
       mediaRec.onerror=function(){
@@ -522,15 +499,120 @@ function toggleMediaRec(){
         isRecordingAudio=false;
       };
 
-      mediaRec.start(250);  // 每250ms收集一次数据
+      mediaRec.start(250);
       isRecordingAudio=true;
       btn.classList.add('recording');
       document.getElementById('recStatus').textContent='🎙️ 正在录音...（点击按钮停止）';
     })
     .catch(function(err){
-      document.getElementById('recStatus').textContent='⚠️ 无法访问麦克风：'+err.message;
-      btn.classList.remove('recording');
+      // getUserMedia 失败 → 降级到文件选择器（微信 X5 内核会走这里）
+      pickAudioFile();
     });
+}
+
+// ===== 方案A：文件选择器录音（微信/手机专用） =====
+// 利用原生<input type="file" accept="audio/*">调用手机自带录音
+// 无需getUserMedia，无需权限，微信完全兼容
+function pickAudioFile(){
+  var btn=document.getElementById('recBtn');
+
+  // 移除旧的播放器和提示
+  var oldAp=document.getElementById('audioPlayerWrap');
+  if(oldAp)oldAp.remove();
+
+  document.getElementById('recStatus').textContent='📱 打开录音中...';
+
+  var input=document.getElementById('audioFilePicker');
+  if(!input){
+    input=document.createElement('input');
+    input.type='file';
+    input.id='audioFilePicker';
+    input.accept='audio/*';     // 只选音频文件
+    input.capture='true';       // 直接启动录音机（手机支持的话）
+    input.style.display='none';
+    document.body.appendChild(input);
+
+    input.addEventListener('change',function(e){
+      var file=e.target.files[0];
+      if(!file){
+        document.getElementById('recStatus').textContent='⚠️ 未录制音频，请重试';
+        return;
+      }
+      // 创建音频播放
+      var url=URL.createObjectURL(file);
+      // 粗略估算时长
+      var ext=file.name.split('.').pop().toLowerCase();
+      // 手机录音常见格式：iOS→.m4a, Android→.amr/.ogg/.mp4
+      // 用文件大小估秒数（大致：m4a约8KB/s, amr约1KB/s）
+      var kbPerSec=8;
+      if(ext==='amr')kbPerSec=1.2;
+      else if(ext==='ogg')kbPerSec=5;
+      else if(ext==='mp4')kbPerSec=10;
+      var dur=Math.max(1,Math.round(file.size/1024/kbPerSec));
+      showAudioPlayer(url,dur);
+      showTranscriptionInput();
+      document.getElementById('recStatus').textContent='✅ 录音已完成！可点击上方的▶️播放听取';
+      // 重置input以允许重复录制同一文件
+      e.target.value='';
+    });
+  }
+  // 微信X5内核的特殊处理：先触屏交互再触发文件选择器
+  // 使用setTimeout确保在用户手势上下文中触发
+  setTimeout(function(){input.click()},100);
+}
+
+// ===== 方案B：getUserMedia 录音（桌面浏览器专用） =====
+// 保留原有逻辑，代码在 toggleMediaRec 中
+
+// ===== 共用函数：显示音频播放器 =====
+function showAudioPlayer(url,dur){
+  var oldAp=document.getElementById('audioPlayerWrap');
+  if(oldAp)oldAp.remove();
+
+  // 自动获取音频实际时长（优于估算）
+  var showDur='约'+dur+'秒';
+
+  var apHtml='<div id="audioPlayerWrap" style="margin-top:10px;padding:14px;background:#F7FAFC;border-radius:10px;border:1px solid var(--border)">'+
+    '<div style="font-size:13px;font-weight:600;color:var(--slate);margin-bottom:8px;display:flex;align-items:center;gap:6px">'+
+    '<span style="font-size:18px">🎵</span> 录音回放（'+showDur+'）'+
+    '<button onclick="deleteRecording()" style="margin-left:auto;background:none;border:1px solid var(--border);border-radius:6px;padding:3px 10px;font-size:11px;color:var(--red);cursor:pointer">重新录</button>'+
+    '</div>'+
+    '<audio controls src="'+url+'" style="width:100%;border-radius:6px" onloadedmetadata="this.nextElementSibling.textContent=\'⏱️ 实际时长：\'+Math.round(this.duration)+\'秒\'"></audio>'+
+    '<span style="font-size:11px;color:var(--muted);margin-top:4px;display:block">⏱️ 加载中...</span>'+
+    '<div style="font-size:12px;color:var(--muted);margin-top:8px">'+
+    '👆 收听录音后，在下文输入框中输入复盘内容，然后点击"开始分析"</div></div>';
+
+  document.getElementById('recStatus').innerHTML=apHtml;
+
+  // 保存当前音频URL以便"重新录"时释放
+  if(window._currentAudioUrl)URL.revokeObjectURL(window._currentAudioUrl);
+  window._currentAudioUrl=url;
+}
+
+// ===== 共用函数：删除录音重新录制 =====
+function deleteRecording(){
+  if(window._currentAudioUrl){
+    URL.revokeObjectURL(window._currentAudioUrl);
+    window._currentAudioUrl=null;
+  }
+  var ap=document.getElementById('audioPlayerWrap');
+  if(ap)ap.remove();
+  var ta=document.getElementById('transcribedText');
+  ta.value='';
+  ta.classList.remove('show');
+  document.getElementById('editHint').classList.remove('show');
+  document.getElementById('recStatus').textContent='🎙️ 点击麦克风按钮开始录音';
+}
+
+// ===== 共用函数：录音完成后显示手动输入框 =====
+function showTranscriptionInput(){
+  var ta=document.getElementById('transcribedText');
+  ta.classList.add('show');
+  ta.removeAttribute('readonly');
+  ta.classList.add('editable');
+  ta.placeholder='请在此输入您的复盘内容（收听录音后手动输入）...';
+  document.getElementById('editHint').classList.add('show');
+  document.getElementById('editHint').textContent='✏️ 请在此输入复盘内容，完成后点击"开始分析"';
 }
 
 function stopVoiceReview(){
