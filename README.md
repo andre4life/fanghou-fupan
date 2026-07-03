@@ -3,6 +3,8 @@
 ## 在线地址
 https://andre4life.github.io/fuhou-fupan/
 
+> 仓库已统一命名：`andre4life/fuhou-fupan`。
+
 ## 维护说明
 
 ### 更新知识库索引
