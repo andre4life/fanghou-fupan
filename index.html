@@ -296,16 +296,18 @@ document.addEventListener('DOMContentLoaded',function(){
         voiceBaseText=this.value;
       });
     }
-    // 微信环境：自动切换到手动填写，隐藏语音
-    if(isWeChat){
-      switchTab('manual');
-      document.querySelector('.tab[onclick*=\"record\"]').style.display='none';
+    // 语音功能检测：不支持SpeechRecognition的环境使用录音+手动转录模式
+    if(!hasSpeech){
       var notice=document.getElementById('wechatNotice');
-      if(notice)notice.style.display='block';
-    }else if(!hasSpeech){
-      // 不支持语音的浏览器（如部分安卓WebView）
-      document.querySelector('.tab[onclick*=\"record\"]').style.display='none';
-      switchTab('manual');
+      if(notice){
+        if(isWeChat){
+          notice.innerHTML='📱 微信浏览器不支持自动语音识别，但您仍可<strong>录音后收听回放</strong>，再手动输入复盘内容。';
+        }else{
+          notice.innerHTML='🌐 当前浏览器不支持自动语音识别，但您仍可<strong>录音后收听回放</strong>，再手动输入复盘内容。';
+        }
+        notice.style.display='block';
+      }
+      // 不隐藏语音标签页 — 用 MediaRecorder 录音 + 手动转录
     }
   }catch(e){
     console.warn('初始化异常:',e);
@@ -345,25 +347,37 @@ function switchTab(tab){
 // ===== 语音 =====
 var sr=null, reviewText='';
 var voiceBaseText='';  // 中断前已识别的文本，重启时保留
+
+// MediaRecorder fallback 变量
+var mediaRec=null;
+var audioChunks=[];
+var audioBlob=null;
+var audioUrl=null;
+var isRecordingAudio=false;
+
 function toggleRecording(){
-  // 环境不支持语音时降级
-  if(!hasSpeech){
-    document.getElementById('recStatus').textContent='⚠️ 当前浏览器不支持语音识别，请切换手动填写';
-    switchTab('manual');
+  // SpeechRecognition 可用 → 原路径（桌面浏览器）
+  if(hasSpeech){
+    toggleSpeechRec();
     return;
   }
+  // SpeechRecognition 不可用 → MediaRecorder 录音 + 手动转录（微信等环境）
+  toggleMediaRec();
+}
+
+// ===== 原生 SpeechRecognition 路径（Chrome/桌面浏览器 自动识别） =====
+function toggleSpeechRec(){
   var btn=document.getElementById('recBtn');
   if(btn.classList.contains('recording')){stopVoiceReview();return}
   if(!sr){
     try{
       var SR=window.SpeechRecognition||window.webkitSpeechRecognition;
-      if(!SR){hasSpeech=false;switchTab('manual');return}
+      if(!SR){hasSpeech=false;toggleMediaRec();return}
       sr=new SR();sr.lang='zh-CN';sr.interimResults=true;sr.continuous=true;
       sr.onresult=function(e){
         var t='';
         for(var i=e.resultIndex;i<e.results.length;i++)
           t+=e.results[i][0].transcript;
-        // 保留之前会话的文本 + 追加本次识别结果
         reviewText=voiceBaseText+t;
         var el=document.getElementById('transcribedText');
         el.value=reviewText;
@@ -372,14 +386,13 @@ function toggleRecording(){
         document.getElementById('editHint').classList.add('show');
       };
       sr.onerror=function(e){
-        voiceBaseText=reviewText;  // 出错时也保留已识别内容
+        voiceBaseText=reviewText;
         document.getElementById('recStatus').textContent='⚠️ 识别中断：'+e.error;
         stopVoiceReview();
       };
       sr.onend=function(){
         btn.classList.remove('recording');
-        voiceBaseText=reviewText;  // 中断时冻结当前文本，下次追加
-        // 让文本可编辑
+        voiceBaseText=reviewText;
         var el=document.getElementById('transcribedText');
         el.removeAttribute('readonly');
         el.classList.add('editable');
@@ -389,6 +402,9 @@ function toggleRecording(){
         }else{
           document.getElementById('recStatus').textContent='未识别到内容';
         }
+        // 移除音频播放器（如果有）
+        var ap=document.getElementById('audioPlayerWrap');
+        if(ap)ap.remove();
       };
     }catch(e){
       hasSpeech=false;
@@ -396,7 +412,6 @@ function toggleRecording(){
       stopVoiceReview();
     }
   }
-  // 只有首次启动时清空（无已识别内容）
   if(!voiceBaseText){
     reviewText='';
     var el=document.getElementById('transcribedText');
@@ -404,19 +419,129 @@ function toggleRecording(){
     el.classList.remove('show');
     document.getElementById('editHint').classList.remove('show');
   }
-  // 录音中设为只读
   document.getElementById('transcribedText').setAttribute('readonly','true');
   document.getElementById('transcribedText').classList.remove('editable');
   sr.start();btn.classList.add('recording');document.getElementById('recStatus').textContent='🎙️ 正在听...';
 }
+
+// ===== MediaRecorder 录音 + 手动转录路径（微信/无SpeechRecognition环境） =====
+function toggleMediaRec(){
+  var btn=document.getElementById('recBtn');
+
+  // 正在录音 → 停止
+  if(isRecordingAudio){
+    if(mediaRec&&mediaRec.state==='recording'){
+      mediaRec.stop();
+    }
+    isRecordingAudio=false;
+    btn.classList.remove('recording');
+    document.getElementById('recStatus').textContent='⏹️ 正在处理录音...';
+    return;
+  }
+
+  // 检查设备是否支持录音
+  if(!navigator.mediaDevices||!navigator.mediaDevices.getUserMedia){
+    document.getElementById('recStatus').textContent='⚠️ 当前设备不支持录音，请切换手动填写';
+    switchTab('manual');
+    return;
+  }
+
+  // 重置
+  audioChunks=[];
+  audioBlob=null;
+  if(audioUrl){URL.revokeObjectURL(audioUrl);audioUrl=null;}
+
+  navigator.mediaDevices.getUserMedia({audio:true})
+    .then(function(stream){
+      // 确定支持的音频格式
+      var mime='audio/webm';
+      if(typeof MediaRecorder!=='function'){
+        stream.getTracks().forEach(function(t){t.stop()});
+        document.getElementById('recStatus').textContent='⚠️ 当前浏览器不支持录音功能，请切换手动填写';
+        switchTab('manual');
+        return;
+      }
+      if(!MediaRecorder.isTypeSupported('audio/webm')){
+        mime='audio/ogg;codecs=opus';
+        if(!MediaRecorder.isTypeSupported(mime)){
+          mime='';  // 让浏览器自动选择
+        }
+      }
+
+      try{
+        mediaRec=mime?new MediaRecorder(stream,{mimeType:mime}):new MediaRecorder(stream);
+      }catch(e){
+        mediaRec=new MediaRecorder(stream);
+      }
+
+      mediaRec.ondataavailable=function(e){
+        if(e.data.size>0)audioChunks.push(e.data);
+      };
+
+      mediaRec.onstop=function(){
+        stream.getTracks().forEach(function(t){t.stop()});
+
+        // 构造录音文件
+        var ext=mediaRec.mimeType||'audio/webm';
+        audioBlob=new Blob(audioChunks,{type:ext});
+        audioUrl=URL.createObjectURL(audioBlob);
+
+        isRecordingAudio=false;
+        btn.classList.remove('recording');
+
+        // 估算时长（大约16KB/秒opus）
+        var dur=Math.max(1,Math.round(audioBlob.size/16000));
+
+        // 构建播放器UI
+        var apHtml='<div id="audioPlayerWrap" style="margin-top:10px;padding:14px;background:#F7FAFC;border-radius:10px;border:1px solid var(--border)">'+
+          '<div style="font-size:13px;font-weight:600;color:var(--slate);margin-bottom:8px;display:flex;align-items:center;gap:6px">'+
+          '<span style="font-size:18px">🎵</span> 录音回放（约'+dur+'秒）</div>'+
+          '<audio controls src="'+audioUrl+'" style="width:100%;border-radius:6px"></audio>'+
+          '<div style="font-size:12px;color:var(--muted);margin-top:8px">'+
+          '👆 收听录音后，在下文输入框中输入复盘内容，然后点击"开始分析"</div></div>';
+
+        // 移除旧的播放器
+        var oldAp=document.getElementById('audioPlayerWrap');
+        if(oldAp)oldAp.remove();
+
+        document.getElementById('recStatus').innerHTML=apHtml;
+
+        // 显示文本框，让用户手动输入
+        var ta=document.getElementById('transcribedText');
+        ta.classList.add('show');
+        ta.removeAttribute('readonly');
+        ta.classList.add('editable');
+        ta.placeholder='请在此输入您的复盘内容（收听录音后手动输入）...';
+        document.getElementById('editHint').classList.add('show');
+        document.getElementById('editHint').textContent='✏️ 请在此输入复盘内容，完成后点击"开始分析"';
+      };
+
+      mediaRec.onerror=function(){
+        document.getElementById('recStatus').textContent='⚠️ 录音出错，请检查麦克风权限';
+        btn.classList.remove('recording');
+        isRecordingAudio=false;
+      };
+
+      mediaRec.start(250);  // 每250ms收集一次数据
+      isRecordingAudio=true;
+      btn.classList.add('recording');
+      document.getElementById('recStatus').textContent='🎙️ 正在录音...（点击按钮停止）';
+    })
+    .catch(function(err){
+      document.getElementById('recStatus').textContent='⚠️ 无法访问麦克风：'+err.message;
+      btn.classList.remove('recording');
+    });
+}
+
 function stopVoiceReview(){
   if(sr)sr.stop();
   document.getElementById('recBtn').classList.remove('recording');
-  // 用户手动停止 → 文字可编辑
   var el=document.getElementById('transcribedText');
   el.removeAttribute('readonly');
   el.classList.add('editable');
   document.getElementById('editHint').classList.add('show');
+  var ap=document.getElementById('audioPlayerWrap');
+  if(ap)ap.remove();
 }
 
 // ===== 分析引擎 =====
